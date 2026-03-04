@@ -1,0 +1,25 @@
+# Audio files (test/sample files — not part of the project)
+*.mp3
+*.flac
+*.wav
+*.ogg
+*.aac
+*.m4a
+
+# Claude Code project memory (local only)
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
