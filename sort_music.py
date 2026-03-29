@@ -622,6 +622,7 @@ def process_file(
     acoustid_key: str | None,
     verify: bool = False,
     discogs_token: str | None = None,
+    rename_only: bool = False,
 ) -> tuple[str, str]:
     """Process a single MP3 file: detect genre, rename, move/copy.
 
@@ -641,7 +642,7 @@ def process_file(
         folder = detect_genre(normalized)
 
     # --- Step 2b: Verify ID3 genre against MusicBrainz (--verify) ---
-    if verify and folder is not None and _MB_AVAILABLE:
+    if not rename_only and verify and folder is not None and _MB_AVAILABLE:
         v_artist = id3_artist or parse_filename(filepath.stem)[0]
         v_title = id3_title or parse_filename(filepath.stem)[1]
         if v_artist and v_artist != "Unknown" and v_title:
@@ -661,7 +662,7 @@ def process_file(
     # --- Step 3a: MusicBrainz text lookup for unknown genre ---
     fp_artist: str | None = None
     fp_title: str | None = None
-    if folder is None and _MB_AVAILABLE:
+    if not rename_only and folder is None and _MB_AVAILABLE:
         # Resolve artist+title for the search query
         lookup_artist = id3_artist
         lookup_title = id3_title
@@ -679,10 +680,11 @@ def process_file(
                     print(f"[WEB] {filepath.name}: genre '{web_data['genre']}' -> {folder!r}")
 
     # --- Step 3b: Discogs lookup — fires for unknown genre OR generic Electronic ---
+    # Skipped in rename-only mode (genre is irrelevant).
     # Discogs `style` field provides specific subgenres (e.g. 'Deep House') that
     # MusicBrainz tags often lack. Not used in --verify to avoid false positives
     # from remix releases.
-    if folder is None or folder == "Electronic":
+    if not rename_only and (folder is None or folder == "Electronic"):
         disc_artist = id3_artist
         disc_title = id3_title
         if not disc_artist or not disc_title:
@@ -700,7 +702,7 @@ def process_file(
                     folder = found
 
     # --- Step 3d: Audio fingerprint fallback (needs fpcalc + AcoustID key) ---
-    if folder is None and acoustid_key:
+    if not rename_only and folder is None and acoustid_key:
         fp_data = fingerprint_file(filepath, acoustid_key)
         if fp_data.get("genre"):
             folder = detect_genre(normalize_genre(fp_data["genre"]))
@@ -711,8 +713,8 @@ def process_file(
     if folder is None:
         folder = "_Unknown"
 
-    # --- Step 5: Already-sorted check ---
-    if is_already_sorted(filepath, folder, destination):
+    # --- Step 5: Already-sorted check (skipped in rename-only mode) ---
+    if not rename_only and is_already_sorted(filepath, folder, destination):
         return folder, "skipped"
 
     # --- Step 6: Determine target filename ---
@@ -737,6 +739,27 @@ def process_file(
         final_artist = sanitize(smart_title_case(normalize_artists(artist)))
         final_title = sanitize(smart_title_case(clean_title))
         target_name = build_normalized_filename(artist, clean_title, version)
+
+    # --- Rename-only mode: rename in place, no folder sorting ---
+    if rename_only:
+        if target_name == filepath.name:
+            return folder, "skipped"
+        # Case-only renames (e.g. "te plac" -> "Te Plac") resolve to the same path on
+        # Windows (case-insensitive FS). Don't run conflict resolution in that case —
+        # the target IS the source file, not a different file.
+        candidate = filepath.parent / target_name
+        dest_path = candidate if target_name.lower() == filepath.name.lower() else resolve_conflict(candidate)
+        if dry_run:
+            print(f"[DRY RUN] RENAME: {filepath.name!r}  ->  {target_name!r}")
+            return folder, "dry_run"
+        try:
+            os.rename(filepath, dest_path)
+        except OSError as e:
+            print(f"ERROR: could not rename {filepath.name}: {e}", file=sys.stderr)
+            return "_Error", "error"
+        if final_artist and final_title:
+            write_id3_metadata(dest_path, final_artist, final_title)
+        return folder, "renamed"
 
     # --- Step 7: Destination path ---
     genre_dir = destination / folder
@@ -847,6 +870,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip filename normalization; only sort into genre folders",
     )
     parser.add_argument(
+        "--rename-only",
+        action="store_true",
+        help="Rename files in place without moving them to genre folders",
+    )
+    parser.add_argument(
         "--acoustid-key",
         metavar="KEY",
         default=None,
@@ -904,7 +932,7 @@ def main() -> None:
         print(f"No MP3 files found in '{args.source}'.")
         return
 
-    verb = "Scanning" if args.dry_run else ("Copying" if args.copy else "Sorting")
+    verb = "Scanning" if args.dry_run else ("Renaming" if args.rename_only else ("Copying" if args.copy else "Sorting"))
     print(f"{verb} {len(files)} file(s) from '{args.source}'...")
     if args.dry_run:
         print("(dry run — no files will be moved)\n")
@@ -921,6 +949,7 @@ def main() -> None:
             acoustid_key=acoustid_key,
             verify=args.verify,
             discogs_token=discogs_token,
+            rename_only=args.rename_only,
         )
         if action == "skipped":
             results["_Skipped"] += 1
